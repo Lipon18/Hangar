@@ -54,3 +54,112 @@ impl Profile {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn valid_profile_toml(build_type: &str) -> String {
+        format!(
+              r#"
+                [profile]
+                name = "Windows Release"
+                os = "Windows"
+                compiler = "MSVC2022"
+                build_type = "{build_type}"
+                dependencies_dir = "deps"
+                arch = "x64"
+            "#
+        )
+    }
+
+    #[test]
+    fn loads_valid_profile() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("profile.toml");
+
+        fs::write(&path, valid_profile_toml("Release")).unwrap();
+
+        let profile = Profile::load(&path).unwrap();
+
+        assert_eq!(profile.name, "Windows Release");
+        assert_eq!(profile.os, "Windows");
+        assert_eq!(profile.compiler, "MSVC2022");
+        assert_eq!(profile.build_type, "Release");
+        assert_eq!(profile.dependencies_dir, "deps");
+        assert_eq!(profile.arch.as_deref(), Some("x64"));
+    }
+
+    #[test]
+    fn generates_lowercase_profile_key() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("profile.toml");
+
+        fs::write(&path, valid_profile_toml("Release")).unwrap();
+
+        let profile = Profile::load(&path).unwrap();
+
+        assert_eq!(
+            profile.key(),
+            "windows-x64-msvc2022-release"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_build_type() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("profile.toml");
+
+        fs::write(&path, valid_profile_toml("FastBuild")).unwrap();
+
+        let error = Profile::load(&path).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("build_type 'FastBuild' is not valid")
+        );
+    }
+
+    #[test]
+    fn accepts_all_supported_build_types() {
+        for build_type in [
+            "Debug",
+            "Release",
+            "RelWithDebInfo",
+            "MinSizeRel",
+        ] {
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("profile.toml");
+
+            fs::write(&path, valid_profile_toml(build_type)).unwrap();
+
+            assert!(
+                Profile::load(&path).is_ok(),
+                "should accept {build_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_arch_uses_default_in_key() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("profile.toml");
+
+        let toml = r#"
+            [profile]
+            name = "Linux Debug"
+            os = "Linux"
+            compiler = "GCC"
+            build_type = "Debug"
+            dependencies_dir = "deps"
+        "#;
+
+        fs::write(&path, toml).unwrap();
+
+        let profile = Profile::load(&path).unwrap();
+
+        assert_eq!(profile.key(), "linux-default-gcc-debug");
+        assert_eq!(profile.arch, None);
+    }
+}
