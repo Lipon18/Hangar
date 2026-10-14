@@ -1,0 +1,33 @@
+[package]
+name = "sample_engine"
+version = "0.1.0"
+
+[dependencies.glm]
+git = "https://github.com/g-truc/glm.git"
+tag = "1.0.1"
+headers = ["glm"]
+
+[dependencies.SDL3]
+git = "https://github.com/libsdl-org/SDL.git"
+tag = "release-3.4.12"
+options = [
+    "SDL_SHARED=OFF",
+    "SDL_STATIC=ON",
+    "SDL_TESTS=OFF",
+    "SDL_EXAMPLES=OFF",
+    "SDL_INSTALL_TESTS=OFF",
+    "SDL_INSTALL_DOCS=OFF",
+]
+
+[dependencies.box2d]
+git = "https://github.com/erincatto/box2d.git"
+tag = "v3.1.1"
+options = [
+    "BOX2D_SAMPLES=OFF", 
+    "BOX2D_UNIT_TESTS=OFF", 
+    "BOX2D_BENCHMARKS=OFF", 
+    "BOX2D_DOCS=OFF", 
+    "BOX2D_PROFILE=OFF", 
+    "BOX2D_VALIDATE=OFF",
+    "BOX2D_SANITIZE=OFF",
+]

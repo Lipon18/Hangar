@@ -1,0 +1,19 @@
+[package]
+name = "Hangar"
+version = "0.1.0"
+edition = "2024"
+description = "Registry-free C/C++ package manager written in Rust"
+license = "MIT"
+repository = ""
+readme = "README.nd"
+keywords = ["cpp", "cmake", "package-manager", "gamedev", "rust"]
+categories = ["development-tools::build-utils", "command-line-utilities"]
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+
+[build-dependencies]
+winres = "0.1"
