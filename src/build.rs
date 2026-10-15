@@ -172,8 +172,10 @@ fn build_with_cmake(
 
 /// Copy configured header paths into the installation's include directory.
 ///
-/// Directory paths contribute their contents, preserving nested directories.
-/// Individual files are copied directly into include/.
+/// Both directories and files are copied into include/ under their own
+/// name. A directory keeps its name and nested layout, so `glm` becomes
+/// `include/glm/...` and `<glm/glm.hpp>` resolves. A single file is copied
+/// directly into include/.
 fn install_headers(
     name: &str,
     dep: &Dependency,
@@ -191,21 +193,13 @@ fn install_headers(
             );
         }
 
-        if from.is_dir() {
-            fs::create_dir_all(&include)?;
+        // Works for directories and files alike: keep the last path
+        // component as the name inside include/.
+        let entry_name = from
+            .file_name()
+            .with_context(|| format!("{name}: invalid header path '{header_path}'"))?;
 
-            for entry in fs::read_dir(&from)? {
-                let entry = entry?;
-
-                copy_recursive(
-                    &entry.path(),
-                    &include.join(entry.file_name()),
-                )?;
-            }
-        } else {
-            let file_name = from.file_name().context("invalid header path")?;
-            copy_recursive(&from, &include.join(file_name))?;
-        }
+        copy_recursive(&from, &include.join(entry_name))?;
 
         println!("[hangar] {name}: copying headers from {header_path}");
     }
@@ -253,12 +247,14 @@ mod tests {
         }
     }
 
+    /// Header-only dependency whose headers live in the `example` folder
+    /// of the repository, like `glm` in the glm repository.
     fn header_dependency() -> Dependency {
         Dependency {
             git: "unused".to_string(),
             tag: "v1.0.0".to_string(),
             options: vec![],
-            headers: vec!["include".to_string()],
+            headers: vec!["example".to_string()],
         }
     }
 
@@ -327,7 +323,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------
-    // Existing header-only tests
+    // Header-only tests
     // ---------------------------------------------------------
 
     #[test]
@@ -335,16 +331,16 @@ mod tests {
         let temp = tempdir().unwrap();
         let source = temp.path().join("source");
 
-        fs::create_dir_all(source.join("include/nested")).unwrap();
+        fs::create_dir_all(source.join("example/nested")).unwrap();
 
         fs::write(
-            source.join("include/example.hpp"),
+            source.join("example/example.hpp"),
             "#pragma once\n",
         )
         .unwrap();
 
         fs::write(
-            source.join("include/nested/detail.hpp"),
+            source.join("example/nested/detail.hpp"),
             "#pragma once\n",
         )
         .unwrap();
@@ -369,24 +365,73 @@ mod tests {
         let prefix = paths.export("example", &dep.tag);
         print_tree(&prefix);
 
+        // The folder name is preserved: include/example/..., so that
+        // `#include <example/example.hpp>` works.
         assert!(prefix.join("include").is_dir());
-        assert!(prefix.join("include/example.hpp").is_file());
-        assert!(prefix.join("include/nested/detail.hpp").is_file());
+        assert!(prefix.join("include/example").is_dir());
+        assert!(prefix.join("include/example/example.hpp").is_file());
+        assert!(prefix.join("include/example/nested/detail.hpp").is_file());
+
+        // The folder's contents must NOT be flattened into include/.
+        assert!(!prefix.join("include/example.hpp").exists());
+        assert!(!prefix.join("include/nested").exists());
 
         assert_eq!(
-            fs::read_to_string(prefix.join("include/example.hpp")).unwrap(),
+            fs::read_to_string(prefix.join("include/example/example.hpp")).unwrap(),
             "#pragma once\n"
         );
 
         assert_eq!(
             fs::read_to_string(
-                prefix.join("include/nested/detail.hpp")
+                prefix.join("include/example/nested/detail.hpp")
             )
             .unwrap(),
             "#pragma once\n"
         );
 
         assert!(prefix.join(".hangar-0123456789").is_file());
+    }
+
+    #[test]
+    fn installs_single_header_file_directly_into_include() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+
+        fs::create_dir_all(source.join("single")).unwrap();
+
+        fs::write(
+            source.join("single/lib.hpp"),
+            "#pragma once\n",
+        )
+        .unwrap();
+
+        let profile = test_profile(temp.path());
+        let paths = Paths::new(&profile);
+
+        let dep = Dependency {
+            git: "unused".to_string(),
+            tag: "v1.0.0".to_string(),
+            options: vec![],
+            headers: vec!["single/lib.hpp".to_string()],
+        };
+
+        let installed = build(
+            "single",
+            &dep,
+            &profile,
+            &paths,
+            &source,
+            "0123456789abcdef",
+            &[],
+        )
+        .unwrap();
+
+        assert!(installed);
+
+        let prefix = paths.export("single", &dep.tag);
+
+        assert!(prefix.join("include/lib.hpp").is_file());
+        assert!(!prefix.join("include/single").exists());
     }
 
     #[test]
@@ -439,7 +484,7 @@ mod tests {
 
         assert!(
             format!("{:#}", result.unwrap_err())
-                .contains("header path 'include' not found")
+                .contains("header path 'example' not found")
         );
     }
 
@@ -448,10 +493,10 @@ mod tests {
         let temp = tempdir().unwrap();
         let source = temp.path().join("source");
 
-        fs::create_dir_all(source.join("include")).unwrap();
+        fs::create_dir_all(source.join("example")).unwrap();
 
         fs::write(
-            source.join("include/example.hpp"),
+            source.join("example/example.hpp"),
             "#pragma once\n",
         )
         .unwrap();
@@ -482,7 +527,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------
-    // New CMake tests (Windows)
+    // CMake tests (Windows)
     // ---------------------------------------------------------
 
     #[cfg(windows)]
