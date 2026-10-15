@@ -1,7 +1,7 @@
 # Hangar
 
 <p align="center">
-  <img src="assets/hangar_banner.png" alt="Hangar — Rust package manager for C/C++" width="100%">
+  <img src="assets/Hangar_banner.png" alt="Hangar — Rust package manager for C/C++" width="100%">
 </p>
 
 Keywords: cpp · c++ · cmake · package-manager · gamedev · rust
