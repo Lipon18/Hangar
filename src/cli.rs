@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "hanger", version, about = "Registry-free C/C++ package manager")]
+#[command(name = "hangar", version, about = "Registry-free C/C++ package manager")]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Cmd,

@@ -5,7 +5,7 @@ edition = "2024"
 description = "Registry-free C/C++ package manager written in Rust"
 license = "MIT"
 repository = "https://github.com/Lipon18/Hangar.git"
-readme = "README.nd"
+readme = "README.md"
 keywords = ["cpp", "cmake", "package-manager", "gamedev", "rust"]
 categories = ["development-tools::build-utils", "command-line-utilities"]
 
