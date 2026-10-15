@@ -1,5 +1,11 @@
 # Hangar
 
+<p align="center">
+  <img src="assets/hangar_banner.png" alt="Hangar — Rust package manager for C/C++" width="100%">
+</p>
+
+Keywords: cpp · c++ · cmake · package-manager · gamedev · rust
+
 A small, registry-free package manager for C/C++ projects, written in Rust.
 Point it at a Git repository and a tag, and Hangar fetches, builds and installs
 the library so CMake's `find_package()` can use it.
