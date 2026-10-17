@@ -124,6 +124,7 @@ mod tests {
             tag: tag.to_string(),
             options: vec![],
             headers: vec![],
+            overlay: None,
         }
     }
 

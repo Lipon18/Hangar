@@ -5,7 +5,7 @@ mod manifest;
 mod paths;
 mod profile;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use cli::{Cli, Cmd};
 use manifest::Manifest;
@@ -36,15 +36,33 @@ fn fwd(p: &Path) -> String {
 
 fn install(
     manifest_path: &Path,
-    profile_path: &Path,
+    profile_paths: &[PathBuf],
     cmake_out: Option<&Path>,
 ) -> Result<()> {
     let manifest = Manifest::load(manifest_path)?;
-    let profile = Profile::load(profile_path)?;
-    let paths = Paths::new(&profile);
+
+    let profiles = profile_paths
+        .iter()
+        .map(|path| Profile::load(path))
+        .collect::<Result<Vec<_>>>()?;
+
+    // Every profile must share the install prefix of the first one.
+    let (first, rest) = profiles
+        .split_first()
+        .context("at least one --profile is required")?;
+
+    for other in rest {
+        first.ensure_same_prefix(other)?;
+    }
+
+    let paths = Paths::new(first);
 
     println!("Project  : {} v{}", manifest.package.name, manifest.package.version);
-    println!("Profile  : {} ({})", profile.name, profile.key());
+    println!("Platform : {}", first.key());
+    println!("Profiles :");
+    for profile in &profiles {
+        println!("  - {} ({})", profile.name, profile.build_types.join(", "));
+    }
     println!("Root     : {}", paths.root.display());
     println!();
     println!("Plan ({} dependencies):", manifest.dependencies.len());
@@ -60,12 +78,21 @@ fn install(
     for (name, dep) in &manifest.dependencies {
         let source_dir = paths.source(name, &dep.tag);
         let commit = fetch::fetch(name, dep, &source_dir)?;
-        let built = build::build(name, dep, &profile, &paths, &source_dir, &commit, &installed)?;
+
+        // One build per profile. They all install into the same prefix, and
+        // build types that are already installed are skipped.
+        let mut built = false;
+        for profile in &profiles {
+            built |= build::build(name, dep, profile, &paths, &source_dir, &commit, &installed)?;
+        }
 
         installed.push(paths.export(name, &dep.tag));
+
+        // Avoid panicking on a commit string shorter than 10 bytes.
+        let short_commit = commit.get(..10).unwrap_or(commit.as_str());
+
         println!(
-            "[hangar] {name}: {} ({})",
-            &commit[..10],
+            "[hangar] {name}: {short_commit} ({})",
             if built { "installed" } else { "already installed" }
         );
     }
@@ -75,7 +102,9 @@ fn install(
         for (name, dep) in &manifest.dependencies {
             let prefix = fwd(&paths.export(name, &dep.tag));
             if dep.headers.is_empty() {
-                // Compiled library: find_package() finds its config file here
+                // Compiled library: find_package() finds its config file here.
+                // The prefix holds every build type, and CMake picks the one
+                // matching the active configuration.
                 text += &format!("list(APPEND CMAKE_PREFIX_PATH \"{prefix}\")\n");
             } else {
                 // Header-only library: an imported target that carries the include path

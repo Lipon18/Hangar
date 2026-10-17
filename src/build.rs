@@ -1,4 +1,9 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{
+    bail, 
+    Context, 
+    Result
+};
+
 use std::{
     ffi::OsStr,
     fs,
@@ -43,6 +48,31 @@ fn cmake_command(program: &OsStr) -> Command {
     Command::new(path)
 }
 
+/// Name of the file that marks a finished installation.
+///
+/// Header-only dependencies have one marker: `.hangar-<commit>`.
+/// Compiled dependencies have one marker per build type:
+/// `.hangar-<commit>-<build type>`.
+fn marker_name(short_commit: &str, build_type: Option<&str>) -> String {
+    match build_type {
+        Some(build_type) => format!(".hangar-{short_commit}-{build_type}"),
+        None => format!(".hangar-{short_commit}"),
+    }
+}
+
+/// Delete whatever is in the prefix and start with an empty folder.
+fn reset_prefix(prefix: &Path) -> Result<()> {
+    if prefix.exists() {
+        fs::remove_dir_all(prefix)
+            .with_context(|| format!("cannot remove {}", prefix.display()))?;
+    }
+
+    fs::create_dir_all(prefix)
+        .with_context(|| format!("cannot create {}", prefix.display()))?;
+
+    Ok(())
+}
+
 /// Install one dependency into its own prefix.
 /// Returns true if it installed something, false if it was already installed.
 pub fn build(
@@ -81,91 +111,150 @@ fn build_with_cmake(
 
     // Avoid panicking if the supplied commit is shorter than 10 bytes.
     let short_commit = commit.get(..10).unwrap_or(commit);
-    let marker = prefix.join(format!(".hangar-{short_commit}"));
 
-    if marker.exists() {
-        return Ok(false);
-    }
-
-    // Remove leftovers from an interrupted installation.
-    if prefix.exists() {
-        fs::remove_dir_all(&prefix)
-            .with_context(|| format!("cannot remove {}", prefix.display()))?;
-    }
-
-    fs::create_dir_all(&prefix)
-        .with_context(|| format!("cannot create {}", prefix.display()))?;
-
-    // Header-only dependencies do not need CMake.
+    // Header-only dependencies do not need CMake and do not depend on the
+    // build type, so they have a single marker.
     if !dep.headers.is_empty() {
+        let marker = prefix.join(marker_name(short_commit, None));
+
+        if marker.exists() {
+            return Ok(false);
+        }
+
+        // Remove leftovers from an interrupted installation.
+        reset_prefix(&prefix)?;
+
         install_headers(name, dep, source_dir, &prefix)?;
         fs::write(&marker, "")?;
+
         return Ok(true);
     }
 
-    // Compiled dependency: configure, build, and install.
-    let build_dir = paths.build(name, &dep.tag);
+    // Compiled dependency: every build type is installed into the same
+    // prefix and has its own marker, so a run can resume with only the
+    // build types that are still missing.
+    let marker_for = |build_type: &str| prefix.join(marker_name(short_commit, Some(build_type)));
 
-    fs::create_dir_all(&build_dir)
-        .with_context(|| format!("cannot create {}", build_dir.display()))?;
+    let missing: Vec<&str> = profile
+        .build_types
+        .iter()
+        .map(String::as_str)
+        .filter(|build_type| !marker_for(*build_type).exists())
+        .collect();
 
-    println!("[hangar] {name}: configuring");
-
-    let mut cfg = cmake_command(cmake_program);
-
-    cfg.arg("-S")
-        .arg(source_dir)
-        .arg("-B")
-        .arg(&build_dir)
-        .arg(format!("-DCMAKE_BUILD_TYPE={}", profile.build_type))
-        .arg(format!("-DCMAKE_INSTALL_PREFIX={}", prefix.display()));
-
-    if !installed.is_empty() {
-        let list = installed
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(";");
-
-        cfg.arg(format!("-DCMAKE_PREFIX_PATH={list}"));
+    if missing.is_empty() {
+        return Ok(false);
     }
 
-    if let Some(generator) = &profile.generator {
-        cfg.args(["-G", generator]);
+    // An overlay replaces the repository's own CMakeLists.txt. Check it
+    // before anything is deleted or built.
+    let configure_source: &Path = match &dep.overlay {
+        Some(overlay) => {
+            if !overlay.join("CMakeLists.txt").is_file() {
+                bail!(
+                    "{name}: overlay '{}' has no CMakeLists.txt",
+                    overlay.display()
+                );
+            }
+            overlay.as_path()
+        }
+        None => source_dir,
+    };
+
+    // No finished build type for this commit: whatever is in the prefix is
+    // leftover from an interrupted run (or from another commit), so clean
+    // it. If at least one build type is finished, keep the prefix and only
+    // add the missing ones next to it.
+    let has_finished_build = profile
+        .build_types
+        .iter()
+        .any(|build_type| marker_for(build_type).exists());
+
+    if !has_finished_build {
+        reset_prefix(&prefix)?;
     }
 
-    if let Some(arch) = &profile.arch {
-        cfg.args(["-A", arch]);
-    }
+    for build_type in missing {
+        let build_dir = paths.build(name, &dep.tag, build_type);
 
-    for option in &dep.options {
-        cfg.arg(format!("-D{option}"));
-    }
+        fs::create_dir_all(&build_dir)
+            .with_context(|| format!("cannot create {}", build_dir.display()))?;
 
-    run(&mut cfg, &format!("cmake configure for '{name}'"))?;
+        println!("[hangar] {name}: configuring ({build_type})");
 
-    println!("[hangar] {name}: building ({})", profile.build_type);
+        let mut cfg = cmake_command(cmake_program);
 
-    run(
-        &mut cmake_command(cmake_program)
-            .arg("--build")
+        cfg.arg("-S")
+            .arg(configure_source)
+            .arg("-B")
             .arg(&build_dir)
-            .args(["--config", &profile.build_type, "--parallel"]),
-        &format!("cmake build for '{name}'"),
-    )?;
+            .arg(format!("-DCMAKE_BUILD_TYPE={build_type}"))
+            .arg(format!("-DCMAKE_INSTALL_PREFIX={}", prefix.display()));
 
-    println!("[hangar] {name}: installing");
+        // An overlay builds the sources of the shared git clone, which it
+        // finds through HANGAR_SOURCE_DIR. The clone itself is never changed.
+        if dep.overlay.is_some() {
+            cfg.arg(format!(
+                "-DHANGAR_SOURCE_DIR={}",
+                source_dir.to_string_lossy().replace('\\', "/")
+            ));
+        }
 
-    run(
-        &mut cmake_command(cmake_program)
-            .arg("--install")
-            .arg(&build_dir)
-            .args(["--config", &profile.build_type]),
-        &format!("cmake install for '{name}'"),
-    )?;
+        // Debug and Release libraries share one prefix. Give Debug libraries
+        // a "d" suffix so they don't overwrite the Release ones. Libraries
+        // that set their own postfix keep it, and dependency options below
+        // can still override this.
+        if build_type == "Debug" {
+            cfg.arg("-DCMAKE_DEBUG_POSTFIX=d");
+        }
 
-    // Only mark the dependency installed after all stages succeed.
-    fs::write(&marker, "")?;
+        if !installed.is_empty() {
+            let list = installed
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(";");
+
+            cfg.arg(format!("-DCMAKE_PREFIX_PATH={list}"));
+        }
+
+        if let Some(generator) = &profile.generator {
+            cfg.args(["-G", generator]);
+        }
+
+        if let Some(arch) = &profile.arch {
+            cfg.args(["-A", arch]);
+        }
+
+        for option in &dep.options {
+            cfg.arg(format!("-D{option}"));
+        }
+
+        run(&mut cfg, &format!("cmake configure for '{name}' ({build_type})"))?;
+
+        println!("[hangar] {name}: building ({build_type})");
+
+        run(
+            &mut cmake_command(cmake_program)
+                .arg("--build")
+                .arg(&build_dir)
+                .args(["--config", build_type, "--parallel"]),
+            &format!("cmake build for '{name}' ({build_type})"),
+        )?;
+
+        println!("[hangar] {name}: installing ({build_type})");
+
+        run(
+            &mut cmake_command(cmake_program)
+                .arg("--install")
+                .arg(&build_dir)
+                .args(["--config", build_type]),
+            &format!("cmake install for '{name}' ({build_type})"),
+        )?;
+
+        // Only mark this build type installed after all its stages succeed.
+        fs::write(marker_for(build_type), "")?;
+    }
 
     Ok(true)
 }
@@ -235,16 +324,20 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    fn test_profile(root: &Path) -> Profile {
+    fn test_profile_with(root: &Path, build_types: &[&str]) -> Profile {
         Profile {
             name: "Test".to_string(),
             os: "Windows".to_string(),
             compiler: "MSVC".to_string(),
-            build_type: "Release".to_string(),
+            build_types: build_types.iter().map(|b| b.to_string()).collect(),
             dependencies_dir: root.to_string_lossy().into_owned(),
             generator: None,
             arch: Some("x64".to_string()),
         }
+    }
+
+    fn test_profile(root: &Path) -> Profile {
+        test_profile_with(root, &["Release"])
     }
 
     /// Header-only dependency whose headers live in the `example` folder
@@ -255,6 +348,7 @@ mod tests {
             tag: "v1.0.0".to_string(),
             options: vec![],
             headers: vec!["example".to_string()],
+            overlay: None,
         }
     }
 
@@ -264,9 +358,12 @@ mod tests {
             tag: "v1.0.0".to_string(),
             options: vec!["SDL_TESTS=OFF".to_string()],
             headers: vec![],
+            overlay: None,
         }
     }
 
+    // Only used by the Windows fake-CMake tests.
+    #[cfg(windows)]
     fn prepare_compiled_source(root: &Path) -> PathBuf {
         let source = root.join("compiled-source");
         fs::create_dir_all(&source).unwrap();
@@ -393,6 +490,44 @@ mod tests {
     }
 
     #[test]
+    fn header_only_dependency_ignores_build_types() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+
+        fs::create_dir_all(source.join("example")).unwrap();
+
+        fs::write(
+            source.join("example/example.hpp"),
+            "#pragma once\n",
+        )
+        .unwrap();
+
+        let profile = test_profile_with(temp.path(), &["Debug", "Release"]);
+        let paths = Paths::new(&profile);
+        let dep = header_dependency();
+
+        let installed = build(
+            "example",
+            &dep,
+            &profile,
+            &paths,
+            &source,
+            "0123456789abcdef",
+            &[],
+        )
+        .unwrap();
+
+        assert!(installed);
+
+        let prefix = paths.export("example", &dep.tag);
+
+        // One marker, no per-build-type markers.
+        assert!(prefix.join(".hangar-0123456789").is_file());
+        assert!(!prefix.join(".hangar-0123456789-Debug").exists());
+        assert!(!prefix.join(".hangar-0123456789-Release").exists());
+    }
+
+    #[test]
     fn installs_single_header_file_directly_into_include() {
         let temp = tempdir().unwrap();
         let source = temp.path().join("source");
@@ -413,6 +548,7 @@ mod tests {
             tag: "v1.0.0".to_string(),
             options: vec![],
             headers: vec!["single/lib.hpp".to_string()],
+            overlay: None,
         };
 
         let installed = build(
@@ -527,6 +663,68 @@ mod tests {
     }
 
     // ---------------------------------------------------------
+    // Compiled dependency: markers (runs everywhere, never calls CMake)
+    // ---------------------------------------------------------
+
+    #[test]
+    fn skips_compiled_dependency_when_every_build_type_is_installed() {
+        let temp = tempdir().unwrap();
+        let profile = test_profile_with(temp.path(), &["Debug", "Release"]);
+        let paths = Paths::new(&profile);
+        let dep = compiled_dependency();
+
+        let prefix = paths.export("compiled-example", &dep.tag);
+        fs::create_dir_all(&prefix).unwrap();
+
+        fs::write(prefix.join(".hangar-0123456789-Debug"), "").unwrap();
+        fs::write(prefix.join(".hangar-0123456789-Release"), "").unwrap();
+
+        // Returns before CMake would be started.
+        let installed = build(
+            "compiled-example",
+            &dep,
+            &profile,
+            &paths,
+            temp.path(),
+            "0123456789abcdef",
+            &[],
+        )
+        .unwrap();
+
+        assert!(!installed);
+    }
+
+    #[test]
+    fn overlay_without_cmakelists_fails_before_touching_the_prefix() {
+        let temp = tempdir().unwrap();
+        let profile = test_profile(temp.path());
+        let paths = Paths::new(&profile);
+
+        let mut dep = compiled_dependency();
+        dep.overlay = Some(temp.path().join("overlays/missing"));
+
+        let result = build(
+            "compiled-example",
+            &dep,
+            &profile,
+            &paths,
+            temp.path(),
+            "0123456789abcdef",
+            &[],
+        );
+
+        assert!(result.is_err());
+
+        assert!(
+            format!("{:#}", result.unwrap_err())
+                .contains("has no CMakeLists.txt")
+        );
+
+        // Nothing was created or deleted.
+        assert!(!paths.export("compiled-example", &dep.tag).exists());
+    }
+
+    // ---------------------------------------------------------
     // CMake tests (Windows)
     // ---------------------------------------------------------
 
@@ -555,7 +753,7 @@ mod tests {
         assert!(installed);
 
         let prefix = paths.export("compiled-example", &dep.tag);
-        assert!(prefix.join(".hangar-0123456789").is_file());
+        assert!(prefix.join(".hangar-0123456789-Release").is_file());
 
         let log = fs::read_to_string(
             temp.path().join("cmake-args.txt"),
@@ -567,6 +765,149 @@ mod tests {
         assert!(log.contains("--install"));
         assert!(log.contains("-DCMAKE_BUILD_TYPE=Release"));
         assert!(log.contains("-DSDL_TESTS=OFF"));
+
+        // The debug postfix is only for Debug builds.
+        assert!(!log.contains("-DCMAKE_DEBUG_POSTFIX=d"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn compiled_dependency_builds_every_build_type_into_one_prefix() {
+        let temp = tempdir().unwrap();
+        let source = prepare_compiled_source(temp.path());
+        let profile = test_profile_with(temp.path(), &["Debug", "Release"]);
+        let paths = Paths::new(&profile);
+        let dep = compiled_dependency();
+        let fake = fake_cmake(temp.path(), None);
+
+        let installed = build_with_cmake(
+            "compiled-example",
+            &dep,
+            &profile,
+            &paths,
+            &source,
+            "0123456789abcdef",
+            &[],
+            fake.as_os_str(),
+        )
+        .unwrap();
+
+        assert!(installed);
+
+        let prefix = paths.export("compiled-example", &dep.tag);
+        assert!(prefix.join(".hangar-0123456789-Debug").is_file());
+        assert!(prefix.join(".hangar-0123456789-Release").is_file());
+
+        // Each build type has its own build folder.
+        assert!(paths.build("compiled-example", &dep.tag, "Debug").is_dir());
+        assert!(paths.build("compiled-example", &dep.tag, "Release").is_dir());
+
+        let log = fs::read_to_string(
+            temp.path().join("cmake-args.txt"),
+        )
+        .unwrap();
+
+        assert!(log.contains("-DCMAKE_BUILD_TYPE=Debug"));
+        assert!(log.contains("-DCMAKE_BUILD_TYPE=Release"));
+        assert!(log.contains("--config Debug"));
+        assert!(log.contains("--config Release"));
+        assert!(log.contains("-DCMAKE_DEBUG_POSTFIX=d"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resumes_with_only_the_missing_build_types() {
+        let temp = tempdir().unwrap();
+        let source = prepare_compiled_source(temp.path());
+        let profile = test_profile_with(temp.path(), &["Debug", "Release"]);
+        let paths = Paths::new(&profile);
+        let dep = compiled_dependency();
+        let fake = fake_cmake(temp.path(), None);
+
+        // Release is already finished from an earlier run.
+        let prefix = paths.export("compiled-example", &dep.tag);
+        fs::create_dir_all(&prefix).unwrap();
+        fs::write(prefix.join(".hangar-0123456789-Release"), "").unwrap();
+        fs::write(prefix.join("release-library.lib"), "keep me").unwrap();
+
+        let installed = build_with_cmake(
+            "compiled-example",
+            &dep,
+            &profile,
+            &paths,
+            &source,
+            "0123456789abcdef",
+            &[],
+            fake.as_os_str(),
+        )
+        .unwrap();
+
+        assert!(installed);
+
+        // The finished Release install was not wiped...
+        assert!(prefix.join("release-library.lib").is_file());
+        assert!(prefix.join(".hangar-0123456789-Release").is_file());
+
+        // ...and Debug was added next to it.
+        assert!(prefix.join(".hangar-0123456789-Debug").is_file());
+
+        let log = fs::read_to_string(
+            temp.path().join("cmake-args.txt"),
+        )
+        .unwrap();
+
+        assert!(log.contains("-DCMAKE_BUILD_TYPE=Debug"));
+        assert!(!log.contains("-DCMAKE_BUILD_TYPE=Release"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn overlay_is_configured_instead_of_the_repository() {
+        let temp = tempdir().unwrap();
+        let source = prepare_compiled_source(temp.path());
+
+        let overlay = temp.path().join("overlay");
+        fs::create_dir_all(&overlay).unwrap();
+        fs::write(
+            overlay.join("CMakeLists.txt"),
+            "project(Overlay LANGUAGES NONE)\n",
+        )
+        .unwrap();
+
+        let profile = test_profile(temp.path());
+        let paths = Paths::new(&profile);
+
+        let mut dep = compiled_dependency();
+        dep.overlay = Some(overlay.clone());
+
+        let fake = fake_cmake(temp.path(), None);
+
+        let installed = build_with_cmake(
+            "compiled-example",
+            &dep,
+            &profile,
+            &paths,
+            &source,
+            "0123456789abcdef",
+            &[],
+            fake.as_os_str(),
+        )
+        .unwrap();
+
+        assert!(installed);
+
+        let log = fs::read_to_string(
+            temp.path().join("cmake-args.txt"),
+        )
+        .unwrap();
+
+        // CMake configures the overlay folder, not the repository...
+        assert!(log.contains(&overlay.display().to_string()));
+        assert!(!log.contains(&source.display().to_string()));
+
+        // ...and is told where the repository clone is.
+        let clone = source.to_string_lossy().replace('\\', "/");
+        assert!(log.contains(&format!("-DHANGAR_SOURCE_DIR={clone}")));
     }
 
     #[cfg(windows)]
@@ -591,7 +932,7 @@ mod tests {
     fn assert_cmake_failure_does_not_write_marker(stage: &str) {
         let temp = tempdir().unwrap();
         let source = prepare_compiled_source(temp.path());
-        let profile = test_profile(temp.path());
+        let profile = test_profile_with(temp.path(), &["Debug", "Release"]);
         let paths = Paths::new(&profile);
         let dep = compiled_dependency();
         let fake = fake_cmake(temp.path(), Some(stage));
@@ -610,9 +951,14 @@ mod tests {
         assert!(result.is_err(), "Expected {stage} failure");
 
         let prefix = paths.export("compiled-example", &dep.tag);
-        assert!(
-            !prefix.join(".hangar-0123456789").exists(),
-            "Marker must not exist after {stage} failure"
-        );
+
+        for build_type in ["Debug", "Release"] {
+            assert!(
+                !prefix
+                    .join(format!(".hangar-0123456789-{build_type}"))
+                    .exists(),
+                "Marker for {build_type} must not exist after {stage} failure"
+            );
+        }
     }
 }
