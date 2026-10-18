@@ -25,8 +25,11 @@ jobs:
       - name: Cache Cargo Dependencies & Build
         uses: swatinem/rust-cache@v2
 
-      - name: Build & Test (Release)
+      - name: Run Tests (Release)
         run: cargo test --release --verbose
+
+      - name: Build Release Binary
+        run: cargo build --release --verbose
 
       - name: Upload Release Binary
         uses: actions/upload-artifact@v7
