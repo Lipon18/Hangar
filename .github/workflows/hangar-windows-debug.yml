@@ -1,4 +1,4 @@
-name: Hangar-CI
+name: Windows Debug CI
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -46,40 +46,3 @@ jobs:
 
       - name: Test (Debug)
         run: cargo test --verbose
-
-  build-release:
-    name: Build (Release)
-    runs-on: windows-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Cache Cargo Dependencies & Build
-        uses: swatinem/rust-cache@v2
-
-      - name: Build (Release)
-        run: cargo build --release --verbose
-
-  test-release:
-    name: Test (Release)
-    needs: build-release
-    runs-on: windows-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Cache Cargo Dependencies & Build
-        uses: swatinem/rust-cache@v2
-
-      - name: Test (Release)
-        run: cargo test --release --verbose
