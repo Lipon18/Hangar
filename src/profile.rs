@@ -8,6 +8,7 @@ struct ProfileFile {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     pub name: String,
     pub os: String,
@@ -249,9 +250,24 @@ mod tests {
         assert_eq!(profile.arch, None);
     }
 
-    // ---------------------------------------------------------
+    #[test]
+    fn reject_unknown_profile_keys() {
+        let toml = r#"
+            [profile]
+            name = "Windows"
+            os = "Windows"
+            compiler = "MSVC2022"
+            build_type = "Release"
+            build_types = ["Release"]
+            dependencies_dir = "deps"
+        "#;
+
+        let error = load(toml).unwrap_err();
+
+        assert!(format!("{error:#}").contains("unknown field `build_type`"));
+    }
+
     // Several profiles installed together
-    // ---------------------------------------------------------
 
     #[test]
     fn debug_and_release_profiles_share_a_prefix() {

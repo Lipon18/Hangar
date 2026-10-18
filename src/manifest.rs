@@ -20,6 +20,7 @@ pub struct Package {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Dependency {
     pub git: String,
     pub tag: String,
@@ -262,5 +263,31 @@ mod tests {
             format!("{error:#}")
                 .contains("dependency 'lua': 'overlay' cannot be combined with 'headers'")
         );
+    }
+
+    #[test]
+    fn misspelled_dependency_key_is_rejected() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("hangar.toml");
+
+        // Keys are case-sensitive: 'Overlay' is not 'overlay'.
+        fs::write(
+            &path,
+             r#"
+                [package]
+                name = "my-game"
+                version = "1.0.0"
+ 
+                [dependencies.soil]
+                git = "https://example.com/soil.git"
+                tag = "master"
+                Overlay = "Overlays/soil"
+            "#,
+        )
+        .unwrap();
+
+        let error = Manifest::load(&path).unwrap_err();
+
+        assert!(format!("{error:#}").contains("unknown field 'Overlay'"));
     }
 }
