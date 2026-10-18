@@ -10,8 +10,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-debug:
-    name: Build (Debug)
+  test-debug:
+    name: Build & Test (Debug)
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -25,24 +25,5 @@ jobs:
       - name: Cache Cargo Dependencies & Build
         uses: swatinem/rust-cache@v2
 
-      - name: Build (Debug)
-        run: cargo build --verbose
-
-  test-debug:
-    name: Test (Debug)
-    needs: build-debug
-    runs-on: windows-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Cache Cargo Dependencies & Build
-        uses: swatinem/rust-cache@v2
-
-      - name: Test (Debug)
+      - name: Build & Test (Debug)
         run: cargo test --verbose
