@@ -288,6 +288,6 @@ mod tests {
 
         let error = Manifest::load(&path).unwrap_err();
 
-        assert!(format!("{error:#}").contains("unknown field 'Overlay'"));
+        assert!(format!("{error:#}").contains("unknown field `Overlay`"));
     }
 }
