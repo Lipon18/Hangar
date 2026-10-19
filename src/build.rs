@@ -1,9 +1,4 @@
-use anyhow::{
-    bail, 
-    Context, 
-    Result
-};
-
+use anyhow::{bail, Context, Result};
 use std::{
     ffi::OsStr,
     fs,
@@ -71,6 +66,21 @@ fn reset_prefix(prefix: &Path) -> Result<()> {
         .with_context(|| format!("cannot create {}", prefix.display()))?;
 
     Ok(())
+}
+
+/// True if the prefix holds a finished install of ANY build type of this
+/// commit. It must not matter which profile installed it: Debug and Release
+/// can come from two different profile files that share one prefix.
+fn has_marker_for_commit(prefix: &Path, short_commit: &str) -> bool {
+    let wanted = format!(".hangar-{short_commit}-");
+
+    fs::read_dir(prefix)
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().starts_with(&wanted))
+        })
+        .unwrap_or(false)
 }
 
 /// Install one dependency into its own prefix.
@@ -165,10 +175,10 @@ fn build_with_cmake(
     // leftover from an interrupted run (or from another commit), so clean
     // it. If at least one build type is finished, keep the prefix and only
     // add the missing ones next to it.
-    let has_finished_build = profile
-        .build_types
-        .iter()
-        .any(|build_type| marker_for(build_type).exists());
+    // Look at the markers of every build type, not only the ones listed in
+    // this profile. Otherwise a Release-only profile would wipe the Debug
+    // install that a Debug-only profile made into the same prefix.
+    let has_finished_build = has_marker_for_commit(&prefix, short_commit);
 
     if !has_finished_build {
         reset_prefix(&prefix)?;
@@ -695,6 +705,30 @@ mod tests {
     }
 
     #[test]
+    fn finds_markers_of_any_build_type_for_the_same_commit() {
+        let temp = tempdir().unwrap();
+        let prefix = temp.path().join("prefix");
+
+        // No folder yet.
+        assert!(!has_marker_for_commit(&prefix, "0123456789"));
+
+        fs::create_dir_all(&prefix).unwrap();
+        assert!(!has_marker_for_commit(&prefix, "0123456789"));
+
+        // A header-only marker is not a build type marker.
+        fs::write(prefix.join(".hangar-0123456789"), "").unwrap();
+        assert!(!has_marker_for_commit(&prefix, "0123456789"));
+
+        // A marker of another commit does not count.
+        fs::write(prefix.join(".hangar-aaaaaaaaaa-Debug"), "").unwrap();
+        assert!(!has_marker_for_commit(&prefix, "0123456789"));
+
+        // Any build type of this commit counts.
+        fs::write(prefix.join(".hangar-0123456789-Debug"), "").unwrap();
+        assert!(has_marker_for_commit(&prefix, "0123456789"));
+    }
+
+    #[test]
     fn overlay_without_cmakelists_fails_before_touching_the_prefix() {
         let temp = tempdir().unwrap();
         let profile = test_profile(temp.path());
@@ -858,6 +892,55 @@ mod tests {
 
         assert!(log.contains("-DCMAKE_BUILD_TYPE=Debug"));
         assert!(!log.contains("-DCMAKE_BUILD_TYPE=Release"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_second_profile_keeps_the_build_types_of_the_first() {
+        let temp = tempdir().unwrap();
+        let source = prepare_compiled_source(temp.path());
+
+        // Two profile files that share one prefix: Debug-only, then Release-only.
+        let debug_profile = test_profile_with(temp.path(), &["Debug"]);
+        let release_profile = test_profile_with(temp.path(), &["Release"]);
+
+        let paths = Paths::new(&debug_profile);
+        let dep = compiled_dependency();
+        let fake = fake_cmake(temp.path(), None);
+
+        let prefix = paths.export("compiled-example", &dep.tag);
+
+        build_with_cmake(
+            "compiled-example",
+            &dep,
+            &debug_profile,
+            &paths,
+            &source,
+            "0123456789abcdef",
+            &[],
+            fake.as_os_str(),
+        )
+        .unwrap();
+
+        // Stands in for the Debug library files.
+        fs::write(prefix.join("debug-library.lib"), "keep me").unwrap();
+
+        build_with_cmake(
+            "compiled-example",
+            &dep,
+            &release_profile,
+            &paths,
+            &source,
+            "0123456789abcdef",
+            &[],
+            fake.as_os_str(),
+        )
+        .unwrap();
+
+        // The Release run must not have deleted the Debug install.
+        assert!(prefix.join("debug-library.lib").is_file());
+        assert!(prefix.join(".hangar-0123456789-Debug").is_file());
+        assert!(prefix.join(".hangar-0123456789-Release").is_file());
     }
 
     #[cfg(windows)]
