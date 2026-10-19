@@ -1,0 +1,64 @@
+name: Hangar Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish-release:
+    name: Build & Publish Release
+    runs-on: windows-latest
+
+    # Needed to create the GitHub Release and upload files to it.
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check that the tag matches the Cargo.toml version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart("v")
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"' -List).Matches[0].Groups[1].Value
+          if ($tag -ne $version) {
+            Write-Host "::error::Tag v$tag does not match the Cargo.toml version $version"
+            exit 1
+          }
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies and build
+        uses: swatinem/rust-cache@v2
+
+      - name: Run tests (Release)
+        run: cargo test --release
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "hangar-${{ github.ref_name }}-windows-x64"
+          New-Item -ItemType Directory -Path "dist/$name" | Out-Null
+          Copy-Item target/release/Hangar.exe "dist/$name/hangar.exe"
+          Copy-Item README.md, LICENSE "dist/$name/"
+          Compress-Archive -Path "dist/$name" -DestinationPath "dist/$name.zip"
+          $hash = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File "dist/$name.zip.sha256" -Encoding ascii
+
+      - name: Create GitHub Release and upload files
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/*.zip
+            dist/*.sha256
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

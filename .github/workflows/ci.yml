@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Build & Test (${{ matrix.name }})
+    runs-on: windows-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debug
+            flags: ""
+          - name: Release
+            flags: "--release"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies and build
+        uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Run tests (${{ matrix.name }})
+        run: cargo test ${{ matrix.flags }}
+
+      - name: Build release binary
+        if: matrix.name == 'Release'
+        run: cargo build --release
+
+      - name: Upload release binary
+        if: matrix.name == 'Release'
+        uses: actions/upload-artifact@v7
+        with:
+          name: hangar-windows-release
+          path: target/release/Hangar.exe
+          if-no-files-found: error
+          retention-days: 14
